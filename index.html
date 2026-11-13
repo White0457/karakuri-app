@@ -343,6 +343,8 @@ textarea.dump{width:100%;box-sizing:border-box;min-height:120px;font-family:ui-m
       + '<section class="panel"><h2>状態のイラスト</h2><p class="help">用意したイラストに差し替えられます。背景が透明な正方形のPNGがきれいに表示されます。</p><div class="icons">'
       + ['ok','soon','over'].map(k => '<div class="icon-slot"><img src="'+iconSrc(k)+'" alt="'+LABEL[k]+'"><b>'+LABEL[k]+'</b><button class="btn sm" data-act="img" data-kind="icon" data-k="'+k+'">変更</button>'
         + (S.icons[k] ? '<button class="btn sm line" data-act="iconReset" data-k="'+k+'">仮の絵に戻す</button>' : '')+'</div>').join('')+'</div></section>'
+      + '<section class="panel" id="setupPanel"><h2>初期データを取り込む</h2><p class="help">用意された初期データ(イラスト・部品・品番)を、パスワードを入れて取り込みます。今の内容は置き換わります。</p>'
+      + '<div class="row" style="justify-content:flex-start;align-items:flex-end"><div class="field" style="min-width:240px"><label for="setupPw">パスワード</label><input id="setupPw" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="xxxx-xxxx-xxxx-xxxx"></div><button class="btn" id="setupBtn" data-act="setup">取り込む</button></div></section>'
       + '<section class="panel"><h2>バックアップ</h2><p class="help">データとイラストはこのiPadの中にしかありません。全部を1つのファイルに保存しておくと、iPadの交換や故障のときに戻せます。月に1回程度がおすすめです。</p>'
       + '<div class="row" style="justify-content:flex-start"><button class="btn" data-act="backup">バックアップを保存</button><button class="btn line" data-act="restore">バックアップから戻す</button></div>'
       + '<div id="fallbackBox" hidden><p class="help">この画面ではファイル保存ができませんでした。下の内容をすべてコピーしてメモ帳などに保存してください。</p><textarea class="dump" id="fallbackText" readonly></textarea></div></section>'
@@ -433,6 +435,7 @@ textarea.dump{width:100%;box-sizing:border-box;min-height:120px;font-family:ui-m
       case 'dDel': ui.confirm = ui.dev; render(); break;
       case 'dDelOk': { const d = findDev(ui.dev); delImg(d.img); d.parts.forEach(p => delImg(p.img)); S.devices = S.devices.filter(x => x !== d); Object.assign(ui, { dev:null, edit:false, confirm:null }); save(); render(); toast('からくりを削除しました'); break; }
       case 'clearSample': S = blank(); Object.assign(ui, { tab:'home', dev:null, edit:false, part:null, placing:null }); save(); render(); toast('サンプルを消しました。「からくりを追加」から登録してください'); break;
+      case 'setup': importSetup(); break;
       case 'csv': exportCSV(); break;
       case 'backup': backup(); break;
       case 'restore': $('importInput').value = ''; $('importInput').click(); break;
@@ -484,23 +487,44 @@ textarea.dump{width:100%;box-sizing:border-box;min-height:120px;font-family:ui-m
     }catch(e){ toast('この画像は読み込めませんでした'); }
   });
 
+  async function applyImport(d, msg){
+    if(!d || !Array.isArray(d.devices)) throw new Error('format');
+    const map = {};
+    for(const [k, v] of Object.entries(d.images || {})) map[k] = await putImg(v);
+    const fix = k => k && map[k] ? map[k] : (k && k.startsWith('builtin:') ? k : null);
+    d.devices.forEach(dv => { dv.img = fix(dv.img); dv.parts.forEach(p => { p.img = fix(p.img); }); });
+    const icons = d.icons || {}; Object.keys(icons).forEach(k => { icons[k] = fix(icons[k]); });
+    S = { v:2, sample:false, warnDays:d.warnDays || 7, icons:{ ok:icons.ok||null, soon:icons.soon||null, over:icons.over||null }, devices:d.devices, hist:d.hist || [] };
+    save(); Object.assign(ui, { tab:'home', dev:null, edit:false, part:null, confirm:null }); render(); toast(msg);
+    if(!imgPersist) toast('イラストをこのiPadに保存できませんでした。閉じると消えます');
+  }
   $('importInput').addEventListener('change', () => {
     const f = $('importInput').files[0]; if(!f) return;
     const r = new FileReader();
-    r.onload = async () => {
-      try{
-        const d = JSON.parse(r.result); if(!d || !Array.isArray(d.devices)) throw 0;
-        const map = {};
-        for(const [k, v] of Object.entries(d.images || {})) map[k] = await putImg(v);
-        const fix = k => k && map[k] ? map[k] : (k && k.startsWith('builtin:') ? k : null);
-        d.devices.forEach(dv => { dv.img = fix(dv.img); dv.parts.forEach(p => { p.img = fix(p.img); }); });
-        const icons = d.icons || {}; Object.keys(icons).forEach(k => { icons[k] = fix(icons[k]); });
-        S = { v:2, sample:false, warnDays:d.warnDays || 7, icons:{ ok:icons.ok||null, soon:icons.soon||null, over:icons.over||null }, devices:d.devices, hist:d.hist || [] };
-        save(); Object.assign(ui, { tab:'home', dev:null, edit:false, part:null }); render(); toast('バックアップから戻しました');
-      }catch(e){ toast('このファイルはバックアップとして読み込めません'); }
-    };
+    r.onload = async () => { try{ await applyImport(JSON.parse(r.result), 'バックアップから戻しました'); }catch(e){ toast('このファイルはバックアップとして読み込めません'); } };
     r.readAsText(f);
   });
+
+  // ---------- encrypted setup data published next to the app (setup.json)
+  const b64u8 = b => Uint8Array.from(atob(b), c => c.charCodeAt(0));
+  async function importSetup(){
+    const pw = ($('setupPw').value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if(!pw){ $('setupPw').focus(); toast('パスワードを入力してください'); return; }
+    const btn = $('setupBtn'); btn.disabled = true; btn.textContent = '取り込み中…';
+    try{
+      const res = await fetch('setup.json', { cache:'no-store' });
+      if(!res.ok) throw new Error('nofile');
+      const box = await res.json();
+      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
+      const key = await crypto.subtle.deriveKey({ name:'PBKDF2', salt:b64u8(box.salt), iterations:box.iter, hash:'SHA-256' }, base, { name:'AES-GCM', length:256 }, false, ['decrypt']);
+      let plain;
+      try{ plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv:b64u8(box.iv) }, key, b64u8(box.ct)); }
+      catch(e){ throw new Error('pw'); }
+      await applyImport(JSON.parse(new TextDecoder().decode(plain)), '初期データを取り込みました');
+    }catch(e){
+      toast(e.message === 'pw' ? 'パスワードが違います。もう一度入力してください' : e.message === 'nofile' ? '取り込む初期データが見つかりません。ネットにつながっているか確認してください' : '初期データを取り込めませんでした');
+    }finally{ const b2 = $('setupBtn'); if(b2){ b2.disabled = false; b2.textContent = '取り込む'; } }
+  }
 
   // ---------- files
   async function saveFile(name, text, mime){
